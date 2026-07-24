@@ -1,19 +1,21 @@
-"""Generates an email subject + body from a topic using the Anthropic API."""
+"""Generates an email subject + body from a topic using the Google Gemini API
+(free tier — no billing required to get started)."""
 import os
 import json
-from anthropic import Anthropic
+import google.generativeai as genai
 
-MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-5")
+MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
 
-_client = None
+_model = None
 
 
-def _get_client() -> Anthropic:
-    global _client
-    if _client is None:
-        api_key = os.environ["ANTHROPIC_API_KEY"]
-        _client = Anthropic(api_key=api_key)
-    return _client
+def _get_model():
+    global _model
+    if _model is None:
+        api_key = os.environ["GEMINI_API_KEY"]
+        genai.configure(api_key=api_key)
+        _model = genai.GenerativeModel(MODEL)
+    return _model
 
 
 SYSTEM_PROMPT = (
@@ -28,40 +30,35 @@ SYSTEM_PROMPT = (
 )
 
 
-def draft_email(topic: str, tone_hint: str = "") -> dict:
-    """Returns {'subject': str, 'body': str} drafted from a topic."""
-    client = _get_client()
-    user_content = topic if not tone_hint else f"{topic}\n\nTone/style: {tone_hint}"
-
-    response = client.messages.create(
-        model=MODEL,
-        max_tokens=1000,
-        system=SYSTEM_PROMPT,
-        messages=[{"role": "user", "content": user_content}],
-    )
-
-    text = "".join(block.text for block in response.content if block.type == "text").strip()
-
-    # Defensive parsing in case the model wraps JSON in fences despite instructions
+def _extract_json(text: str) -> dict:
+    text = text.strip()
     if text.startswith("```"):
         text = text.strip("`")
         if text.lower().startswith("json"):
             text = text[4:].strip()
+    return json.loads(text)
+
+
+def draft_email(topic: str, tone_hint: str = "") -> dict:
+    model = _get_model()
+    user_content = topic if not tone_hint else f"{topic}\n\nTone/style: {tone_hint}"
+    full_prompt = f"{SYSTEM_PROMPT}\n\nTopic/instruction from user:\n{user_content}"
+
+    response = model.generate_content(full_prompt)
+    text = (response.text or "").strip()
 
     try:
-        data = json.loads(text)
+        data = _extract_json(text)
         subject = str(data.get("subject", "")).strip()
         body = str(data.get("body", "")).strip()
         if not subject or not body:
             raise ValueError("empty subject/body")
         return {"subject": subject, "body": body}
     except (json.JSONDecodeError, ValueError):
-        # Fallback: use the topic as subject and the raw text as body
         return {"subject": topic[:78], "body": text}
 
 
 def regenerate(topic: str, previous_body: str, feedback: str = "") -> dict:
-    """Ask for a fresh take, optionally steered by feedback on the previous draft."""
     instruction = (
         f"Original topic: {topic}\n\n"
         f"Here was a previous draft you wrote:\n{previous_body}\n\n"
